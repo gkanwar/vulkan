@@ -16,10 +16,13 @@ const std::vector<const char*> g_validation_layers = {
   "VK_LAYER_KHRONOS_validation",
 };
 #ifndef NDEBUG
-const bool g_enable_validation_layers = true;
+constexpr bool g_enable_validation_layers = true;
 #else
-const bool g_enable_validation_layers = false;
+constexpr bool g_enable_validation_layers = false;
 #endif
+
+constexpr uint64_t g_second_ns = 1000000000;
+constexpr uint64_t g_timeout = 10*g_second_ns;
 
 extern const uint8_t _binary_shader_vert_spv_start[];
 extern const uint8_t _binary_shader_vert_spv_end[];
@@ -95,6 +98,7 @@ class Application {
     createVulkanFramebuffers();
     createVulkanCommandPool();
     createVulkanCommandBuffer();
+    createVulkanSyncObjects();
   }
 
   void createVulkanInstance() {
@@ -298,12 +302,23 @@ class Application {
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &color_attach_ref;
 
+    // wait on color attachment output stage from before this render pass
+    vk::SubpassDependency dep = {};
+    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dep.dstSubpass = 0;
+    dep.srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+    dep.srcAccessMask = {};
+    dep.dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+    dep.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+
     vk::RenderPassCreateInfo info = {};
     info.sType = vk::StructureType::eRenderPassCreateInfo;
     info.attachmentCount = 1;
     info.pAttachments = &color_attach;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
+    info.dependencyCount = 1;
+    info.pDependencies = &dep;
 
     auto res = m_device.createRenderPass(&info, nullptr, &m_render_pass);
     check(res, "createRenderPass");
@@ -479,6 +494,21 @@ class Application {
     info.commandBufferCount = 1;
     auto res = m_device.allocateCommandBuffers(&info, &m_cmd_buf);
     check(res, "allocateCommandBuffers");
+  }
+
+  void createVulkanSyncObjects() {
+    vk::SemaphoreCreateInfo info_sem = {};
+    info_sem.sType = vk::StructureType::eSemaphoreCreateInfo;
+    vk::FenceCreateInfo info_fence = {};
+    info_fence.sType = vk::StructureType::eFenceCreateInfo;
+    // fence starts signaled
+    info_fence.flags = vk::FenceCreateFlagBits::eSignaled;
+    auto res = m_device.createSemaphore(&info_sem, nullptr, &m_sem_image_avail);
+    check(res, "createSemaphore");
+    res = m_device.createSemaphore(&info_sem, nullptr, &m_sem_render_done);
+    check(res, "createSemaphore");
+    res = m_device.createFence(&info_fence, nullptr, &m_fence_in_flight);
+    check(res, "createFence");
   }
 
   void recordCommandBuffer(vk::CommandBuffer& cmd_buf, uint32_t img_index) {
@@ -690,13 +720,59 @@ class Application {
       glfwPollEvents();
       drawFrame();
     }
+    m_device.waitIdle();
   }
 
   void drawFrame() {
-    
+    // sync
+    auto res = m_device.waitForFences(1, &m_fence_in_flight, vk::True, g_timeout);
+    check(res, "waitForFences");
+    res = m_device.resetFences(1, &m_fence_in_flight);
+    check(res, "resetFences");
+
+    // get swap chain index, record command buf
+    uint32_t img_index;
+    constexpr auto no_fence = VK_NULL_HANDLE;
+    res = m_device.acquireNextImageKHR(
+        m_swapchain, g_timeout, m_sem_image_avail, no_fence, &img_index);
+    check(res, "acquireNextImageKHR");
+    constexpr vk::CommandBufferResetFlags flags = {};
+    m_cmd_buf.reset(flags);
+    recordCommandBuffer(m_cmd_buf, img_index);
+
+    // submit command buf
+    vk::SubmitInfo info = {};
+    info.sType = vk::StructureType::eSubmitInfo;
+
+    vk::PipelineStageFlags stage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+    info.waitSemaphoreCount = 1;
+    info.pWaitSemaphores = &m_sem_image_avail;
+    info.pWaitDstStageMask = &stage;
+    info.commandBufferCount = 1;
+    info.pCommandBuffers = &m_cmd_buf;
+    info.signalSemaphoreCount = 1;
+    info.pSignalSemaphores = &m_sem_render_done;
+
+    res = m_graphics_queue.submit(1, &info, m_fence_in_flight);
+    check(res, "failed to submit draw command buffer");
+
+    // present frame
+    vk::PresentInfoKHR info_present = {};
+    info_present.sType = vk::StructureType::ePresentInfoKHR;
+    info_present.waitSemaphoreCount = 1;
+    info_present.pWaitSemaphores = &m_sem_render_done;
+    info_present.swapchainCount = 1;
+    info_present.pSwapchains = &m_swapchain;
+    info_present.pImageIndices = &img_index;
+
+    res = m_present_queue.presentKHR(&info_present);
+    check(res, "failed to present frame");
   }
 
   void cleanup() {
+    m_device.destroySemaphore(m_sem_image_avail, nullptr);
+    m_device.destroySemaphore(m_sem_render_done, nullptr);
+    m_device.destroyFence(m_fence_in_flight, nullptr);
     m_device.destroyCommandPool(m_cmd_pool, nullptr);
     for (auto fb : m_swap_fbs) {
       m_device.destroyFramebuffer(fb, nullptr);
@@ -740,6 +816,10 @@ class Application {
   // drawing
   vk::CommandPool m_cmd_pool;
   vk::CommandBuffer m_cmd_buf;
+  // sync
+  vk::Semaphore m_sem_image_avail;
+  vk::Semaphore m_sem_render_done;
+  vk::Fence m_fence_in_flight;
 };
 
 int main() {
