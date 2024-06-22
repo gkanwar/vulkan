@@ -58,10 +58,10 @@ struct Mesh {
   std::vector<glm::vec3> xs;
   std::vector<glm::vec3> colors;
 
-  std::optional<vk::Buffer> xs_buffer;
-  std::optional<vk::Buffer> colors_buffer;
-  std::optional<vk::DeviceMemory> xs_mem;
-  std::optional<vk::DeviceMemory> colors_mem;
+  std::optional<vk::Buffer> xs_buffer, xs_buffer_staging;
+  std::optional<vk::Buffer> colors_buffer, colors_buffer_staging;
+  std::optional<vk::DeviceMemory> xs_mem, xs_mem_staging;
+  std::optional<vk::DeviceMemory> colors_mem, colors_mem_staging;
 
   static std::array<vk::VertexInputBindingDescription, 2>
   getBindingDescriptions() {
@@ -576,79 +576,158 @@ class Application {
     check(res, "createCommandPool");
   }
 
+  void createVkBuffer(
+      vk::DeviceSize size, vk::BufferUsageFlags usage_flags,
+      vk::MemoryPropertyFlags mem_flags,
+      vk::Buffer& buffer, vk::DeviceMemory& mem) {
+    vk::BufferCreateInfo info_buf = {};
+    info_buf.sType = vk::StructureType::eBufferCreateInfo;
+    info_buf.size = size;
+    info_buf.usage = usage_flags;
+    // exclusive to the graphics queue
+    info_buf.sharingMode = vk::SharingMode::eExclusive;
+    auto res = m_device.createBuffer(&info_buf, nullptr, &buffer);
+    check(res, "createBuffer");
+
+    vk::MemoryRequirements mem_reqs;
+    m_device.getBufferMemoryRequirements(buffer, &mem_reqs);
+    vk::MemoryAllocateInfo info_mem = {};
+    info_mem.sType = vk::StructureType::eMemoryAllocateInfo;
+    info_mem.allocationSize = mem_reqs.size;
+    info_mem.memoryTypeIndex = findMemoryType(mem_reqs.memoryTypeBits, mem_flags);
+    res = m_device.allocateMemory(&info_mem, nullptr, &mem);
+    check(res, "allocateMemory");
+
+    m_device.bindBufferMemory(buffer, mem, 0);
+  }
+
   void createVkVertexBuffers(std::vector<Mesh>& meshes) {
+    std::vector<vk::Fence> xfer_fences;
+    std::vector<vk::CommandBuffer> xfer_cmd_bufs;
+    
     for (auto& mesh : meshes) {
+      auto usage_staging = vk::BufferUsageFlagBits::eTransferSrc;
+      auto usage_dst = vk::BufferUsageFlagBits::eVertexBuffer
+          | vk::BufferUsageFlagBits::eTransferDst;
+      auto mem_flags_staging = vk::MemoryPropertyFlagBits::eHostVisible
+          | vk::MemoryPropertyFlagBits::eHostCoherent;
+      auto mem_flags_dst = vk::MemoryPropertyFlagBits::eDeviceLocal;
       // position buffer
       {
-        vk::BufferCreateInfo info_x = {};
-        info_x.sType = vk::StructureType::eBufferCreateInfo;
-        info_x.size = sizeof(mesh.xs[0]) * mesh.xs.size();
-        info_x.usage = vk::BufferUsageFlagBits::eVertexBuffer;
-        // exclusive to the graphics queue
-        info_x.sharingMode = vk::SharingMode::eExclusive;
-        vk::Buffer xs_buffer;
-        auto res = m_device.createBuffer(&info_x, nullptr, &xs_buffer);
-        check(res, "createBuffer");
-        mesh.xs_buffer = xs_buffer;
+        vk::Buffer buffer_staging, buffer_dst;
+        vk::DeviceMemory mem_staging, mem_dst;
+        uint32_t size = sizeof(mesh.xs[0]) * mesh.xs.size();
+        createVkBuffer(
+            size, usage_staging, mem_flags_staging,
+            buffer_staging, mem_staging);
+        mesh.xs_buffer_staging = buffer_staging;
+        mesh.xs_mem_staging = mem_staging;
 
-        vk::MemoryRequirements mem_reqs;
-        m_device.getBufferMemoryRequirements(xs_buffer, &mem_reqs);
-        vk::MemoryAllocateInfo info = {};
-        info.sType = vk::StructureType::eMemoryAllocateInfo;
-        info.allocationSize = mem_reqs.size;
-        // memory that can be mapped on the CPU
-        auto mem_flags = vk::MemoryPropertyFlagBits::eHostVisible
-            | vk::MemoryPropertyFlagBits::eHostCoherent;
-        info.memoryTypeIndex = findMemoryType(mem_reqs.memoryTypeBits, mem_flags);
-        vk::DeviceMemory xs_mem;
-        res = m_device.allocateMemory(&info, nullptr, &xs_mem);
-        check(res, "allocateMemory");
-        mesh.xs_mem = xs_mem;
-
-        m_device.bindBufferMemory(xs_buffer, xs_mem, 0);
         void* xs_mmap;
-        res = m_device.mapMemory(xs_mem, 0, info_x.size, {}, &xs_mmap);
+        auto res = m_device.mapMemory(mem_staging, 0, size, {}, &xs_mmap);
         check(res, "failed to map GPU buffer");
-        memcpy(xs_mmap, mesh.xs.data(), info_x.size);
+        memcpy(xs_mmap, mesh.xs.data(), size);
         // no flush required because we requested coherent memory alloc
-        m_device.unmapMemory(xs_mem);
+        m_device.unmapMemory(mem_staging);
+
+        createVkBuffer(size, usage_dst, mem_flags_dst, buffer_dst, mem_dst);
+        mesh.xs_buffer = buffer_dst;
+        mesh.xs_mem = mem_dst;
+        copyBuffer(buffer_staging, buffer_dst, size, xfer_cmd_bufs, xfer_fences);
       }
       // non-position buffer (colors, normals, etc.)
       {
-        vk::BufferCreateInfo info_c = {};
-        info_c.sType = vk::StructureType::eBufferCreateInfo;
-        info_c.size = sizeof(mesh.colors[0]) * mesh.colors.size();
-        info_c.usage = vk::BufferUsageFlagBits::eVertexBuffer;
-        // exclusive to the graphics queue
-        info_c.sharingMode = vk::SharingMode::eExclusive;
-        vk::Buffer colors_buffer;
-        auto res = m_device.createBuffer(&info_c, nullptr, &colors_buffer);
-        mesh.colors_buffer = colors_buffer;
-        check(res, "createBuffer");
+        vk::Buffer buffer_staging, buffer_dst;
+        vk::DeviceMemory mem_staging, mem_dst;
+        uint32_t size = sizeof(mesh.colors[0]) * mesh.colors.size();
+        createVkBuffer(
+            size, usage_staging, mem_flags_staging,
+            buffer_staging, mem_staging);
+        mesh.colors_buffer_staging = buffer_staging;
+        mesh.colors_mem_staging = mem_staging;
 
-        vk::MemoryRequirements mem_reqs;
-        m_device.getBufferMemoryRequirements(colors_buffer, &mem_reqs);
-        vk::MemoryAllocateInfo info = {};
-        info.sType = vk::StructureType::eMemoryAllocateInfo;
-        info.allocationSize = mem_reqs.size;
-        // memory that can be mapped on the CPU
-        auto mem_flags = vk::MemoryPropertyFlagBits::eHostVisible
-            | vk::MemoryPropertyFlagBits::eHostCoherent;
-        info.memoryTypeIndex = findMemoryType(mem_reqs.memoryTypeBits, mem_flags);
-        vk::DeviceMemory colors_mem;
-        res = m_device.allocateMemory(&info, nullptr, &colors_mem);
-        check(res, "allocateMemory");
-        mesh.colors_mem = colors_mem;
-
-        m_device.bindBufferMemory(colors_buffer, colors_mem, 0);
         void* colors_mmap;
-        res = m_device.mapMemory(colors_mem, 0, info_c.size, {}, &colors_mmap);
+        auto res = m_device.mapMemory(mem_staging, 0, size, {}, &colors_mmap);
         check(res, "failed to map GPU buffer");
-        memcpy(colors_mmap, mesh.colors.data(), info_c.size);
+        memcpy(colors_mmap, mesh.colors.data(), size);
         // no flush required because we requested coherent memory alloc
-        m_device.unmapMemory(colors_mem);
+        m_device.unmapMemory(mem_staging);
+
+        createVkBuffer(size, usage_dst, mem_flags_dst, buffer_dst, mem_dst);
+        mesh.colors_buffer = buffer_dst;
+        mesh.colors_mem = mem_dst;
+        copyBuffer(buffer_staging, buffer_dst, size, xfer_cmd_bufs, xfer_fences);
       }
     }
+
+    auto res = m_device.waitForFences(xfer_fences.size(), xfer_fences.data(), vk::True, TIMEOUT);
+    check(res, "waitForFences");
+
+    for (auto& cmd_buf : xfer_cmd_bufs) {
+      m_device.freeCommandBuffers(m_cmd_pool, 1, &cmd_buf);
+    }
+    for (auto& fence : xfer_fences) {
+      m_device.destroyFence(fence, nullptr);
+    }
+
+    for (auto& mesh : meshes) {
+      assert(mesh.xs_buffer_staging && mesh.colors_buffer_staging);
+      assert(mesh.xs_mem_staging && mesh.colors_mem_staging);
+      m_device.destroyBuffer(mesh.xs_buffer_staging.value(), nullptr);
+      m_device.destroyBuffer(mesh.colors_buffer_staging.value(), nullptr);
+      m_device.freeMemory(mesh.xs_mem_staging.value(), nullptr);
+      m_device.freeMemory(mesh.colors_mem_staging.value(), nullptr);
+      mesh.xs_buffer_staging.reset();
+      mesh.colors_buffer_staging.reset();
+      mesh.xs_mem_staging.reset();
+      mesh.colors_mem_staging.reset();
+    }
+  }
+
+  void copyBuffer(
+      vk::Buffer src, vk::Buffer dst, vk::DeviceSize size,
+      std::vector<vk::CommandBuffer>& cmd_bufs, std::vector<vk::Fence>& fences) {
+    vk::CommandBufferAllocateInfo info = {};
+    info.sType = vk::StructureType::eCommandBufferAllocateInfo;
+    info.level = vk::CommandBufferLevel::ePrimary;
+    info.commandPool = m_cmd_pool;
+    info.commandBufferCount = 1;
+
+    vk::CommandBuffer cmd_buf;
+    auto res = m_device.allocateCommandBuffers(&info, &cmd_buf);
+    check(res, "allocateCommandBuffers");
+
+    vk::CommandBufferBeginInfo info_begin = {};
+    info_begin.sType = vk::StructureType::eCommandBufferBeginInfo;
+    info_begin.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+
+    // build copy command buf
+    res = cmd_buf.begin(&info_begin);
+    check(res, "failed to begin command buffer");
+    vk::BufferCopy info_copy = {};
+    info_copy.srcOffset = 0;
+    info_copy.dstOffset = 0;
+    info_copy.size = size;
+    cmd_buf.copyBuffer(src, dst, 1, &info_copy);
+    cmd_buf.end();
+
+    vk::SubmitInfo info_submit = {};
+    info_submit.sType = vk::StructureType::eSubmitInfo;
+    info_submit.commandBufferCount = 1;
+    info_submit.pCommandBuffers = &cmd_buf;
+
+    vk::FenceCreateInfo info_fence = {};
+    info_fence.sType = vk::StructureType::eFenceCreateInfo;
+    vk::Fence xfer_fence;
+    res = m_device.createFence(&info_fence, nullptr, &xfer_fence);
+    check(res, "createFence");
+
+    res = m_graphics_queue.submit(1, &info_submit, xfer_fence);
+    check(res, "failed to submit command buffer");
+
+    // save for later cleanup
+    cmd_bufs.push_back(cmd_buf);
+    fences.push_back(xfer_fence);
   }
 
   void createVkCommandBuffers() {
