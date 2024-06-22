@@ -4,9 +4,9 @@
 
 // clip depth to [0,1] range
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
-#include <glm/vec4.hpp>
-#include <glm/mat4x4.hpp>
+#include <glm/glm.hpp>
 
+#include <array>
 #include <iostream>
 #include <optional>
 #include <set>
@@ -52,6 +52,46 @@ void check(VkResult res, std::string msg) {
   }
 }
 
+
+// struct-of-arrays mesh
+struct Mesh {
+  std::vector<glm::vec3> xs;
+  std::vector<glm::vec3> colors;
+
+  std::optional<vk::Buffer> xs_buffer;
+  std::optional<vk::Buffer> colors_buffer;
+  std::optional<vk::DeviceMemory> xs_mem;
+  std::optional<vk::DeviceMemory> colors_mem;
+
+  static std::array<vk::VertexInputBindingDescription, 2>
+  getBindingDescriptions() {
+    vk::VertexInputBindingDescription desc_x = {};
+    desc_x.binding = 0;
+    desc_x.stride = sizeof(glm::vec3);
+    desc_x.inputRate = vk::VertexInputRate::eVertex;
+    vk::VertexInputBindingDescription desc_c = {};
+    desc_c.binding = 1;
+    desc_c.stride = sizeof(glm::vec3);
+    desc_c.inputRate = vk::VertexInputRate::eVertex;
+    return {desc_x, desc_c};
+  }
+
+  static std::array<vk::VertexInputAttributeDescription, 2>
+  getAttributeDescriptions() {
+    vk::VertexInputAttributeDescription desc_x = {};
+    desc_x.binding = 0;
+    desc_x.location = 0;
+    desc_x.format = vk::Format::eR32G32B32Sfloat;
+    desc_x.offset = 0;
+    vk::VertexInputAttributeDescription desc_c = {};
+    desc_c.binding = 1;
+    desc_c.location = 1;
+    desc_c.format = vk::Format::eR32G32B32Sfloat;
+    desc_c.offset = 0;
+    return {desc_x, desc_c};
+  }
+};
+
 struct QueueFamilyIndices {
   std::optional<uint32_t> graphics_family;
   std::optional<uint32_t> present_family;
@@ -72,6 +112,7 @@ struct SwapChainSupportDetails {
 class Application {
  public:
   void run() {
+    initMeshes();
     initWindow();
     initVulkan();
     mainLoop();
@@ -79,6 +120,27 @@ class Application {
   }
 
  private:
+  void initMeshes() {
+    // triangles
+    m_meshes.push_back({});
+    m_meshes.back().xs = {
+      glm::vec3(0.0, -0.5, 0.0),
+      glm::vec3(-0.5, 0.5, 0.0),
+      glm::vec3(0.5, 0.5, 0.0),
+      glm::vec3(0.4, -0.4, 0.1),
+      glm::vec3(-0.1, 0.6, 0.1),
+      glm::vec3(0.9, 0.6, 0.1)
+    };
+    m_meshes.back().colors = {
+      glm::vec3(1.0, 1.0, 1.0),
+      glm::vec3(0.0, 1.0, 0.0),
+      glm::vec3(0.0, 0.0, 1.0),
+      glm::vec3(1.0, 0.0, 0.0),
+      glm::vec3(0.0, 1.0, 0.0),
+      glm::vec3(1.0, 1.0, 1.0)
+    };
+  }
+
   void initWindow() {
     glfwInit();
     // no OpenGL
@@ -89,7 +151,8 @@ class Application {
     glfwSetFramebufferSizeCallback(m_window, framebufferResized);
   }
 
-  static void framebufferResized(GLFWwindow* window, [[maybe_unused]] int width, [[maybe_unused]] int height) {
+  static void framebufferResized(
+      GLFWwindow* window, [[maybe_unused]] int width, [[maybe_unused]] int height) {
     auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
     app->m_fb_resized = true;
   }
@@ -105,6 +168,8 @@ class Application {
     createVkGraphicsPipeline();
     createVkFramebuffers();
     createVkCommandPool();
+    // TODO: allow meshes to be added/removed dynamically
+    createVkVertexBuffers(m_meshes);
     createVkCommandBuffers();
     createVkSyncObjects();
   }
@@ -391,11 +456,12 @@ class Application {
     // stage: vertex input
     vk::PipelineVertexInputStateCreateInfo info_vin = {};
     info_vin.sType = vk::StructureType::ePipelineVertexInputStateCreateInfo;
-    // FORNOW: vertex data just hardcoded in vert shader, no dynamic input
-    info_vin.vertexBindingDescriptionCount = 0;
-    info_vin.pVertexBindingDescriptions = nullptr;
-    info_vin.vertexAttributeDescriptionCount = 0;
-    info_vin.pVertexAttributeDescriptions = nullptr;
+    auto bindings = Mesh::getBindingDescriptions();
+    auto attributes = Mesh::getAttributeDescriptions();
+    info_vin.vertexBindingDescriptionCount = 2;
+    info_vin.pVertexBindingDescriptions = bindings.data();
+    info_vin.vertexAttributeDescriptionCount = 2;
+    info_vin.pVertexAttributeDescriptions = attributes.data();
 
     // stage: input assembly
     vk::PipelineInputAssemblyStateCreateInfo info_asm = {};
@@ -510,6 +576,81 @@ class Application {
     check(res, "createCommandPool");
   }
 
+  void createVkVertexBuffers(std::vector<Mesh>& meshes) {
+    for (auto& mesh : meshes) {
+      // position buffer
+      {
+        vk::BufferCreateInfo info_x = {};
+        info_x.sType = vk::StructureType::eBufferCreateInfo;
+        info_x.size = sizeof(mesh.xs[0]) * mesh.xs.size();
+        info_x.usage = vk::BufferUsageFlagBits::eVertexBuffer;
+        // exclusive to the graphics queue
+        info_x.sharingMode = vk::SharingMode::eExclusive;
+        vk::Buffer xs_buffer;
+        auto res = m_device.createBuffer(&info_x, nullptr, &xs_buffer);
+        check(res, "createBuffer");
+        mesh.xs_buffer = xs_buffer;
+
+        vk::MemoryRequirements mem_reqs;
+        m_device.getBufferMemoryRequirements(xs_buffer, &mem_reqs);
+        vk::MemoryAllocateInfo info = {};
+        info.sType = vk::StructureType::eMemoryAllocateInfo;
+        info.allocationSize = mem_reqs.size;
+        // memory that can be mapped on the CPU
+        auto mem_flags = vk::MemoryPropertyFlagBits::eHostVisible
+            | vk::MemoryPropertyFlagBits::eHostCoherent;
+        info.memoryTypeIndex = findMemoryType(mem_reqs.memoryTypeBits, mem_flags);
+        vk::DeviceMemory xs_mem;
+        res = m_device.allocateMemory(&info, nullptr, &xs_mem);
+        check(res, "allocateMemory");
+        mesh.xs_mem = xs_mem;
+
+        m_device.bindBufferMemory(xs_buffer, xs_mem, 0);
+        void* xs_mmap;
+        res = m_device.mapMemory(xs_mem, 0, info_x.size, {}, &xs_mmap);
+        check(res, "failed to map GPU buffer");
+        memcpy(xs_mmap, mesh.xs.data(), info_x.size);
+        // no flush required because we requested coherent memory alloc
+        m_device.unmapMemory(xs_mem);
+      }
+      // non-position buffer (colors, normals, etc.)
+      {
+        vk::BufferCreateInfo info_c = {};
+        info_c.sType = vk::StructureType::eBufferCreateInfo;
+        info_c.size = sizeof(mesh.colors[0]) * mesh.colors.size();
+        info_c.usage = vk::BufferUsageFlagBits::eVertexBuffer;
+        // exclusive to the graphics queue
+        info_c.sharingMode = vk::SharingMode::eExclusive;
+        vk::Buffer colors_buffer;
+        auto res = m_device.createBuffer(&info_c, nullptr, &colors_buffer);
+        mesh.colors_buffer = colors_buffer;
+        check(res, "createBuffer");
+
+        vk::MemoryRequirements mem_reqs;
+        m_device.getBufferMemoryRequirements(colors_buffer, &mem_reqs);
+        vk::MemoryAllocateInfo info = {};
+        info.sType = vk::StructureType::eMemoryAllocateInfo;
+        info.allocationSize = mem_reqs.size;
+        // memory that can be mapped on the CPU
+        auto mem_flags = vk::MemoryPropertyFlagBits::eHostVisible
+            | vk::MemoryPropertyFlagBits::eHostCoherent;
+        info.memoryTypeIndex = findMemoryType(mem_reqs.memoryTypeBits, mem_flags);
+        vk::DeviceMemory colors_mem;
+        res = m_device.allocateMemory(&info, nullptr, &colors_mem);
+        check(res, "allocateMemory");
+        mesh.colors_mem = colors_mem;
+
+        m_device.bindBufferMemory(colors_buffer, colors_mem, 0);
+        void* colors_mmap;
+        res = m_device.mapMemory(colors_mem, 0, info_c.size, {}, &colors_mmap);
+        check(res, "failed to map GPU buffer");
+        memcpy(colors_mmap, mesh.colors.data(), info_c.size);
+        // no flush required because we requested coherent memory alloc
+        m_device.unmapMemory(colors_mem);
+      }
+    }
+  }
+
   void createVkCommandBuffers() {
     vk::CommandBufferAllocateInfo info = {};
     info.sType = vk::StructureType::eCommandBufferAllocateInfo;
@@ -580,11 +721,22 @@ class Application {
     scissor.extent = m_extent;
     cmd_buf.setScissor(0, 1, &scissor);
 
-    const size_t n_vert = 6;
-    const size_t n_inst = 2;
-    const size_t vert_off = 0;
-    const size_t inst_off = 0;
-    cmd_buf.draw(n_vert, n_inst, vert_off, inst_off);
+    // TODO: "bindless" rendering with one large buffer shared across all meshes
+    for (const auto& mesh : m_meshes) {
+      vk::Buffer vert_buffers[] = {mesh.xs_buffer.value(), mesh.colors_buffer.value()};
+      vk::DeviceSize offsets[] = {0, 0};
+
+      const uint32_t off = 0;
+      const uint32_t n_bindings = 2;
+      cmd_buf.bindVertexBuffers(off, n_bindings, vert_buffers, offsets);
+
+      const size_t n_vert = mesh.xs.size();
+      // TODO: reuse vertices with index buf?
+      const size_t n_inst = mesh.xs.size() / 3;
+      const size_t vert_off = 0;
+      const size_t inst_off = 0;
+      cmd_buf.draw(n_vert, n_inst, vert_off, inst_off);
+    }
 
     cmd_buf.endRenderPass();
     cmd_buf.end();
@@ -653,6 +805,24 @@ class Application {
       }
     }
     return indices;
+  }
+
+  uint32_t findMemoryType(uint32_t type_filter, vk::MemoryPropertyFlags flags) {
+    vk::PhysicalDeviceMemoryProperties props;
+    m_phys_device.getMemoryProperties(&props);
+    for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
+      // restrict the allowable types
+      if (!(type_filter & (1 << i))) {
+        continue;
+      }
+      // all required properties are available
+      if ((props.memoryTypes[i].propertyFlags & flags) != flags) {
+        continue;
+      }
+      return i;
+    }
+
+    throw std::runtime_error("failed to find suitable memory");
   }
 
   SwapChainSupportDetails querySwapChainSupportKHR(const vk::PhysicalDevice& device) {
@@ -823,8 +993,26 @@ class Application {
     m_device.destroySwapchainKHR(m_swapchain, nullptr);
   }
 
+  void cleanupVkVertexBuffers(std::vector<Mesh>& meshes) {
+    for (auto& mesh : meshes) {
+      if (mesh.xs_buffer) {
+        m_device.destroyBuffer(mesh.xs_buffer.value(), nullptr);
+        m_device.freeMemory(mesh.xs_mem.value(), nullptr);
+        mesh.xs_buffer.reset();
+        mesh.xs_mem.reset();
+      }
+      if (mesh.colors_buffer) {
+        m_device.destroyBuffer(mesh.colors_buffer.value(), nullptr);
+        m_device.freeMemory(mesh.colors_mem.value(), nullptr);
+        mesh.colors_buffer.reset();
+        mesh.colors_mem.reset();
+      }
+    }
+  }
+
   void cleanup() {
     cleanupVkSwapchain();
+    cleanupVkVertexBuffers(m_meshes);
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
       m_device.destroySemaphore(m_sem_image_avail[i], nullptr);
       m_device.destroySemaphore(m_sem_render_done[i], nullptr);
@@ -872,6 +1060,8 @@ class Application {
   std::vector<vk::Semaphore> m_sem_image_avail;
   std::vector<vk::Semaphore> m_sem_render_done;
   std::vector<vk::Fence> m_fence_in_flight;
+  // data
+  std::vector<Mesh> m_meshes;
 };
 
 int main() {
