@@ -10,3 +10,8 @@ required to compile GLSL to bytecode. Setup for Arch:
 ```
 sudo pacman -S vulkan-devel glfw-x11 glm shaderc
 ```
+
+Resources
+=========
+ - [Vulkan Tutorial](https://vulkan-tutorial.com/) (Alexander Overvoorde)
+ - [Khronos Vulkan Tutorial](https://docs.vulkan.org/tutorial/latest/00_Introduction.html)

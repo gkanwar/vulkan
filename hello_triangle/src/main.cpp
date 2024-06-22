@@ -16,13 +16,15 @@ const std::vector<const char*> g_validation_layers = {
   "VK_LAYER_KHRONOS_validation",
 };
 #ifndef NDEBUG
-constexpr bool g_enable_validation_layers = true;
+constexpr bool ENABLE_VALIDATION_LAYERS = true;
 #else
-constexpr bool g_enable_validation_layers = false;
+constexpr bool ENABLE_VALIDATION_LAYERS = false;
 #endif
 
-constexpr uint64_t g_second_ns = 1000000000;
-constexpr uint64_t g_timeout = 10*g_second_ns;
+constexpr uint64_t SECOND_NS = 1000000000;
+constexpr uint64_t TIMEOUT = 10*SECOND_NS;
+
+constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
 extern const uint8_t _binary_shader_vert_spv_start[];
 extern const uint8_t _binary_shader_vert_spv_end[];
@@ -81,31 +83,53 @@ class Application {
     glfwInit();
     // no OpenGL
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    // non-resizable
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     m_window = glfwCreateWindow(800, 600, "Hello triangle", nullptr, nullptr);
-  }
-  
-  void initVulkan() {
-    createVulkanInstance();
-    createSurface();
-    selectVulkanPhysicalDevice();
-    createVulkanLogicalDevice();
-    createVulkanSwapChain();
-    createVulkanImageViews();
-    createVulkanRenderPass();
-    createVulkanGraphicsPipeline();
-    createVulkanFramebuffers();
-    createVulkanCommandPool();
-    createVulkanCommandBuffer();
-    createVulkanSyncObjects();
+    // resize handler
+    glfwSetWindowUserPointer(m_window, this);
+    glfwSetFramebufferSizeCallback(m_window, framebufferResized);
   }
 
-  void createVulkanInstance() {
-    if (g_enable_validation_layers && !checkValidationLayerSupport()) {
+  static void framebufferResized(GLFWwindow* window, [[maybe_unused]] int width, [[maybe_unused]] int height) {
+    auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
+    app->m_fb_resized = true;
+  }
+
+  void initVulkan() {
+    createVkInstance();
+    createVkSurface();
+    selectVkPhysicalDevice();
+    createVkLogicalDevice();
+    createVkSwapchain();
+    createVkImageViews();
+    createVkRenderPass();
+    createVkGraphicsPipeline();
+    createVkFramebuffers();
+    createVkCommandPool();
+    createVkCommandBuffers();
+    createVkSyncObjects();
+  }
+
+  void recreateVkSwapchain() {
+    // pause until we have a non-trivial draw surface (e.g. wait until not minimized)
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(m_window, &width, &height);
+    while (width == 0 || height == 0) {
+      glfwGetFramebufferSize(m_window, &width, &height);
+      glfwWaitEvents();
+    }
+
+    m_device.waitIdle();
+    cleanupVkSwapchain();
+    createVkSwapchain();
+    createVkImageViews();
+    createVkFramebuffers();
+  }
+
+  void createVkInstance() {
+    if (ENABLE_VALIDATION_LAYERS && !checkValidationLayerSupport()) {
       throw std::runtime_error("validation layers enabled but not supported\n");
     }
-    
+
     vk::ApplicationInfo app_info = {};
     app_info.sType = vk::StructureType::eApplicationInfo;
     app_info.pApplicationName = "Hello triangle";
@@ -123,7 +147,7 @@ class Application {
     glfw_extensions = glfwGetRequiredInstanceExtensions(&glfw_n_extension);
     inst_info.enabledExtensionCount = glfw_n_extension;
     inst_info.ppEnabledExtensionNames = glfw_extensions;
-    if (g_enable_validation_layers) {
+    if (ENABLE_VALIDATION_LAYERS) {
       inst_info.enabledLayerCount = g_validation_layers.size();
       inst_info.ppEnabledLayerNames = g_validation_layers.data();
     }
@@ -132,12 +156,12 @@ class Application {
     check(res, "createInstance");
   }
 
-  void createSurface() {
+  void createVkSurface() {
     auto res = glfwCreateWindowSurface(m_instance, m_window, nullptr, &m_surface);
     check(res, "failed to create window surface");
   }
 
-  void selectVulkanPhysicalDevice() {
+  void selectVkPhysicalDevice() {
     uint32_t n_device = 0;
     auto res = m_instance.enumeratePhysicalDevices(&n_device, nullptr);
     check(res, "");
@@ -163,7 +187,7 @@ class Application {
     }
   }
 
-  void createVulkanLogicalDevice() {
+  void createVkLogicalDevice() {
     QueueFamilyIndices indices = findQueueFamilies(m_phys_device);
     std::vector<vk::DeviceQueueCreateInfo> queue_infos;
     std::set<uint32_t> unique_queue_families = {
@@ -185,13 +209,13 @@ class Application {
     vk::PhysicalDeviceFeatures device_features = {};
 
     vk::DeviceCreateInfo device_info = {};
-    device_info.sType = vk::StructureType::eDeviceCreateInfo; 
+    device_info.sType = vk::StructureType::eDeviceCreateInfo;
     device_info.pQueueCreateInfos = queue_infos.data();
     device_info.queueCreateInfoCount = queue_infos.size();
     device_info.pEnabledFeatures = &device_features;
     device_info.enabledExtensionCount = g_device_extensions.size();
     device_info.ppEnabledExtensionNames = g_device_extensions.data();
-    if (g_enable_validation_layers) {
+    if (ENABLE_VALIDATION_LAYERS) {
       device_info.enabledLayerCount = static_cast<uint32_t>(
           g_validation_layers.size());
       device_info.ppEnabledLayerNames = g_validation_layers.data();
@@ -208,7 +232,7 @@ class Application {
     m_device.getQueue(indices.present_family.value(), 0, &m_present_queue);
   }
 
-  void createVulkanSwapChain() {
+  void createVkSwapchain() {
     SwapChainSupportDetails swap_chain_support = querySwapChainSupportKHR(m_phys_device);
     m_format = selectSwapSurfaceFormatKHR(swap_chain_support.formats);
     m_present_mode = selectSwapPresentModeKHR(swap_chain_support.modes);
@@ -261,7 +285,7 @@ class Application {
     check(res, "getSwapchainImagesKHR");
   }
 
-  void createVulkanImageViews() {
+  void createVkImageViews() {
     m_swap_image_views.resize(m_swap_images.size());
     for (size_t i = 0; i < m_swap_images.size(); ++i) {
       vk::ImageViewCreateInfo info = {};
@@ -283,7 +307,7 @@ class Application {
     }
   }
 
-  void createVulkanRenderPass() {
+  void createVkRenderPass() {
     vk::AttachmentDescription color_attach;
     color_attach.format = m_format.format;
     color_attach.samples = vk::SampleCountFlagBits::e1;
@@ -324,7 +348,7 @@ class Application {
     check(res, "createRenderPass");
   }
 
-  void createVulkanGraphicsPipeline() {
+  void createVkGraphicsPipeline() {
     std::cout << "Built with vertex shader (" << vert_size << ")\n";
     std::cout << "Built with frag shader (" << frag_size << ")\n";
     std::vector<char> vert_code(_binary_shader_vert_spv_start, _binary_shader_vert_spv_end);
@@ -352,7 +376,7 @@ class Application {
 
     vk::PipelineShaderStageCreateInfo shader_stages[] = {info_v, info_f};
 
-    
+
 
     // dynamic state
     std::vector<vk::DynamicState> dynamic_states = {
@@ -454,12 +478,12 @@ class Application {
 
     res = m_device.createGraphicsPipelines(VK_NULL_HANDLE, 1, &info, nullptr, &m_pipeline);
     check(res, "createGraphicsPipelines");
-    
+
     m_device.destroy(vert_mod, nullptr);
     m_device.destroy(frag_mod, nullptr);
   }
 
-  void createVulkanFramebuffers() {
+  void createVkFramebuffers() {
     m_swap_fbs.resize(m_swap_image_views.size());
     for (size_t i = 0; i < m_swap_image_views.size(); ++i) {
       vk::FramebufferCreateInfo info = {};
@@ -476,7 +500,7 @@ class Application {
     }
   }
 
-  void createVulkanCommandPool() {
+  void createVkCommandPool() {
     QueueFamilyIndices queue_family_indices = findQueueFamilies(m_phys_device);
     vk::CommandPoolCreateInfo info = {};
     info.sType = vk::StructureType::eCommandPoolCreateInfo;
@@ -486,29 +510,35 @@ class Application {
     check(res, "createCommandPool");
   }
 
-  void createVulkanCommandBuffer() {
+  void createVkCommandBuffers() {
     vk::CommandBufferAllocateInfo info = {};
     info.sType = vk::StructureType::eCommandBufferAllocateInfo;
     info.commandPool = m_cmd_pool;
     info.level = vk::CommandBufferLevel::ePrimary;
-    info.commandBufferCount = 1;
-    auto res = m_device.allocateCommandBuffers(&info, &m_cmd_buf);
+    info.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+    m_cmd_buf.resize(MAX_FRAMES_IN_FLIGHT);
+    auto res = m_device.allocateCommandBuffers(&info, m_cmd_buf.data());
     check(res, "allocateCommandBuffers");
   }
 
-  void createVulkanSyncObjects() {
+  void createVkSyncObjects() {
     vk::SemaphoreCreateInfo info_sem = {};
     info_sem.sType = vk::StructureType::eSemaphoreCreateInfo;
     vk::FenceCreateInfo info_fence = {};
     info_fence.sType = vk::StructureType::eFenceCreateInfo;
     // fence starts signaled
     info_fence.flags = vk::FenceCreateFlagBits::eSignaled;
-    auto res = m_device.createSemaphore(&info_sem, nullptr, &m_sem_image_avail);
-    check(res, "createSemaphore");
-    res = m_device.createSemaphore(&info_sem, nullptr, &m_sem_render_done);
-    check(res, "createSemaphore");
-    res = m_device.createFence(&info_fence, nullptr, &m_fence_in_flight);
-    check(res, "createFence");
+    m_sem_image_avail.resize(MAX_FRAMES_IN_FLIGHT);
+    m_sem_render_done.resize(MAX_FRAMES_IN_FLIGHT);
+    m_fence_in_flight.resize(MAX_FRAMES_IN_FLIGHT);
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+      auto res = m_device.createSemaphore(&info_sem, nullptr, &m_sem_image_avail[i]);
+      check(res, "createSemaphore");
+      res = m_device.createSemaphore(&info_sem, nullptr, &m_sem_render_done[i]);
+      check(res, "createSemaphore");
+      res = m_device.createFence(&info_fence, nullptr, &m_fence_in_flight[i]);
+      check(res, "createFence");
+    }
   }
 
   void recordCommandBuffer(vk::CommandBuffer& cmd_buf, uint32_t img_index) {
@@ -529,8 +559,7 @@ class Application {
       info.framebuffer = m_swap_fbs[img_index];
       info.renderArea.offset = vk::Offset2D{0, 0};
       info.renderArea.extent = m_extent;
-      // TODO: does this work?
-      vk::ClearValue clear_color = {{0.0f, 0.0f, 1.0f, 1.0f}};
+      vk::ClearValue clear_color = {{0.1f, 0.1f, 0.1f, 1.0f}};
       info.clearValueCount = 1;
       info.pClearValues = &clear_color;
       cmd_buf.beginRenderPass(&info, vk::SubpassContents::eInline);
@@ -551,8 +580,8 @@ class Application {
     scissor.extent = m_extent;
     cmd_buf.setScissor(0, 1, &scissor);
 
-    const size_t n_vert = 3;
-    const size_t n_inst = 1;
+    const size_t n_vert = 6;
+    const size_t n_inst = 2;
     const size_t vert_off = 0;
     const size_t inst_off = 0;
     cmd_buf.draw(n_vert, n_inst, vert_off, inst_off);
@@ -725,20 +754,22 @@ class Application {
 
   void drawFrame() {
     // sync
-    auto res = m_device.waitForFences(1, &m_fence_in_flight, vk::True, g_timeout);
+    auto res = m_device.waitForFences(1, &m_fence_in_flight[m_frame], vk::True, TIMEOUT);
     check(res, "waitForFences");
-    res = m_device.resetFences(1, &m_fence_in_flight);
-    check(res, "resetFences");
 
     // get swap chain index, record command buf
     uint32_t img_index;
     constexpr auto no_fence = VK_NULL_HANDLE;
     res = m_device.acquireNextImageKHR(
-        m_swapchain, g_timeout, m_sem_image_avail, no_fence, &img_index);
+        m_swapchain, TIMEOUT, m_sem_image_avail[m_frame], no_fence, &img_index);
+    if (res == vk::Result::eErrorOutOfDateKHR) {
+      recreateVkSwapchain();
+      return;
+    }
     check(res, "acquireNextImageKHR");
     constexpr vk::CommandBufferResetFlags flags = {};
-    m_cmd_buf.reset(flags);
-    recordCommandBuffer(m_cmd_buf, img_index);
+    m_cmd_buf[m_frame].reset(flags);
+    recordCommandBuffer(m_cmd_buf[m_frame], img_index);
 
     // submit command buf
     vk::SubmitInfo info = {};
@@ -746,44 +777,63 @@ class Application {
 
     vk::PipelineStageFlags stage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
     info.waitSemaphoreCount = 1;
-    info.pWaitSemaphores = &m_sem_image_avail;
+    info.pWaitSemaphores = &m_sem_image_avail[m_frame];
     info.pWaitDstStageMask = &stage;
     info.commandBufferCount = 1;
-    info.pCommandBuffers = &m_cmd_buf;
+    info.pCommandBuffers = &m_cmd_buf[m_frame];
     info.signalSemaphoreCount = 1;
-    info.pSignalSemaphores = &m_sem_render_done;
+    info.pSignalSemaphores = &m_sem_render_done[m_frame];
 
-    res = m_graphics_queue.submit(1, &info, m_fence_in_flight);
+    res = m_device.resetFences(1, &m_fence_in_flight[m_frame]);
+    check(res, "resetFences");
+    res = m_graphics_queue.submit(1, &info, m_fence_in_flight[m_frame]);
     check(res, "failed to submit draw command buffer");
 
     // present frame
     vk::PresentInfoKHR info_present = {};
     info_present.sType = vk::StructureType::ePresentInfoKHR;
     info_present.waitSemaphoreCount = 1;
-    info_present.pWaitSemaphores = &m_sem_render_done;
+    info_present.pWaitSemaphores = &m_sem_render_done[m_frame];
     info_present.swapchainCount = 1;
     info_present.pSwapchains = &m_swapchain;
     info_present.pImageIndices = &img_index;
 
     res = m_present_queue.presentKHR(&info_present);
-    check(res, "failed to present frame");
+    if (res == vk::Result::eErrorOutOfDateKHR ||
+        res == vk::Result::eSuboptimalKHR ||
+        m_fb_resized) {
+      m_fb_resized = false;
+      recreateVkSwapchain();
+    }
+    else {
+      check(res, "failed to present frame");
+    }
+
+    // advance frame
+    m_frame = (m_frame + 1) % MAX_FRAMES_IN_FLIGHT;
   }
 
-  void cleanup() {
-    m_device.destroySemaphore(m_sem_image_avail, nullptr);
-    m_device.destroySemaphore(m_sem_render_done, nullptr);
-    m_device.destroyFence(m_fence_in_flight, nullptr);
-    m_device.destroyCommandPool(m_cmd_pool, nullptr);
+  void cleanupVkSwapchain() {
     for (auto fb : m_swap_fbs) {
       m_device.destroyFramebuffer(fb, nullptr);
     }
-    m_device.destroyPipeline(m_pipeline, nullptr);
-    m_device.destroyPipelineLayout(m_pipeline_layout, nullptr);
-    m_device.destroyRenderPass(m_render_pass, nullptr);
     for (auto image_view : m_swap_image_views) {
       m_device.destroyImageView(image_view, nullptr);
     }
     m_device.destroySwapchainKHR(m_swapchain, nullptr);
+  }
+
+  void cleanup() {
+    cleanupVkSwapchain();
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+      m_device.destroySemaphore(m_sem_image_avail[i], nullptr);
+      m_device.destroySemaphore(m_sem_render_done[i], nullptr);
+      m_device.destroyFence(m_fence_in_flight[i], nullptr);
+    }
+    m_device.destroyCommandPool(m_cmd_pool, nullptr);
+    m_device.destroyPipeline(m_pipeline, nullptr);
+    m_device.destroyPipelineLayout(m_pipeline_layout, nullptr);
+    m_device.destroyRenderPass(m_render_pass, nullptr);
     m_device.destroy(nullptr);
     m_instance.destroySurfaceKHR(m_surface, nullptr);
     m_instance.destroy(nullptr);
@@ -815,16 +865,18 @@ class Application {
   vk::Pipeline m_pipeline;
   // drawing
   vk::CommandPool m_cmd_pool;
-  vk::CommandBuffer m_cmd_buf;
+  std::vector<vk::CommandBuffer> m_cmd_buf;
+  uint32_t m_frame = 0;
+  bool m_fb_resized = false;
   // sync
-  vk::Semaphore m_sem_image_avail;
-  vk::Semaphore m_sem_render_done;
-  vk::Fence m_fence_in_flight;
+  std::vector<vk::Semaphore> m_sem_image_avail;
+  std::vector<vk::Semaphore> m_sem_render_done;
+  std::vector<vk::Fence> m_fence_in_flight;
 };
 
 int main() {
   Application app;
-  try {    
+  try {
     app.run();
   }
   catch (const std::exception& e) {
