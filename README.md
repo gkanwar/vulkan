@@ -14,4 +14,5 @@ sudo pacman -S vulkan-devel glfw-x11 glm shaderc
 Resources
 =========
  - [Vulkan Tutorial](https://vulkan-tutorial.com/) (Alexander Overvoorde)
+ - [Vulkan Guide](https://vkguide.dev/) (vblanco)
  - [Khronos Vulkan Tutorial](https://docs.vulkan.org/tutorial/latest/00_Introduction.html)

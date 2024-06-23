@@ -5,6 +5,9 @@
 // clip depth to [0,1] range
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/string_cast.hpp>
 
 #include <array>
 #include <chrono>
@@ -90,14 +93,18 @@ struct Mesh {
   std::vector<glm::vec3> xs;
   std::vector<glm::vec3> colors;
   std::vector<uint32_t> inds;
+  glm::vec3 trans = glm::vec3(0.0f);
+  glm::quat rot = glm::quat(glm::vec3());
+  glm::vec3 scale = glm::vec3(1.0f);
+  glm::mat4 transform = glm::mat4(1.0f);
 
   // TODO: abstract this, coalesce device memory?
-  std::optional<vk::Buffer> xs_buffer, xs_buffer_staging;
-  std::optional<vk::Buffer> colors_buffer, colors_buffer_staging;
-  std::optional<vk::Buffer> inds_buffer, inds_buffer_staging;
-  std::optional<vk::DeviceMemory> xs_mem, xs_mem_staging;
-  std::optional<vk::DeviceMemory> colors_mem, colors_mem_staging;
-  std::optional<vk::DeviceMemory> inds_mem, inds_mem_staging;
+  std::optional<vk::Buffer> xs_buffer = {}, xs_buffer_staging = {};
+  std::optional<vk::Buffer> colors_buffer = {}, colors_buffer_staging = {};
+  std::optional<vk::Buffer> inds_buffer = {}, inds_buffer_staging = {};
+  std::optional<vk::DeviceMemory> xs_mem = {}, xs_mem_staging = {};
+  std::optional<vk::DeviceMemory> colors_mem = {}, colors_mem_staging = {};
+  std::optional<vk::DeviceMemory> inds_mem = {}, inds_mem_staging = {};
 
   static std::array<vk::VertexInputBindingDescription, 2>
   getBindingDescriptions() {
@@ -126,6 +133,21 @@ struct Mesh {
     desc_c.offset = 0;
     return {desc_x, desc_c};
   }
+
+  void updateTransform() {
+    transform = glm::mat4(1.0f);
+    // glm ops right-multiply, so must order this way to achieve
+    // scale, rotate, then translate
+    transform = glm::translate(transform, trans);
+    transform = transform * glm::mat4_cast(rot);
+    transform = glm::scale(transform, scale);
+  }
+};
+
+struct VertPushConstants {
+  glm::mat4 model;
+  glm::mat4 view;
+  glm::mat4 proj;
 };
 
 struct QueueFamilyIndices {
@@ -178,10 +200,15 @@ class Framerate {
   uint64_t m_frames;
 };
 
+struct Camera {
+  glm::mat4 view;
+  glm::mat4 proj;
+};
+
 class Application {
  public:
   void run() {
-    initMeshes();
+    initGame();
     initWindow();
     initVulkan();
     mainLoop();
@@ -189,25 +216,59 @@ class Application {
   }
 
  private:
-  void initMeshes() {
-    // triangles
-    m_meshes.push_back({});
-    m_meshes.back().xs = {
-      glm::vec3(0.5, -0.5, 0.0),
-      glm::vec3(-0.5, 0.5, 0.0),
-      glm::vec3(0.5, 0.5, 0.0),
-      glm::vec3(-0.5, -0.5, 0.0),
-    };
-    m_meshes.back().colors = {
-      glm::vec3(1.0, 1.0, 1.0),
-      glm::vec3(0.0, 1.0, 0.0),
-      glm::vec3(0.0, 0.0, 1.0),
-      glm::vec3(1.0, 0.0, 0.0),
-    };
-    m_meshes.back().inds = {
-      0, 1, 2,
-      1, 0, 3,
-    };
+  void initGame() {
+    // global clock
+    m_start = my_clock::now();
+
+    // meshes
+    m_meshes.push_back({
+        .xs = {
+          glm::vec3(0.5, -0.5, 0.0),
+          glm::vec3(-0.5, 0.5, 0.0),
+          glm::vec3(0.5, 0.5, 0.0),
+          glm::vec3(-0.5, -0.5, 0.0),
+        },
+        .colors = {
+          glm::vec3(1.0, 1.0, 1.0),
+          glm::vec3(0.0, 1.0, 0.0),
+          glm::vec3(0.0, 0.0, 1.0),
+          glm::vec3(1.0, 0.0, 0.0),
+        },
+        .inds = {
+          1, 0, 2,
+          0, 1, 3,
+        }
+      });
+    m_meshes.push_back({
+        .xs = {
+          glm::vec3(0.5, -0.5, 0.0),
+          glm::vec3(-0.5, 0.5, 0.0),
+          glm::vec3(0.5, 0.5, 0.0),
+          glm::vec3(-0.5, -0.5, 0.0),
+        },
+        .colors = {
+          glm::vec3(0.0, 0.0, 1.0),
+          glm::vec3(1.0, 0.0, 0.0),
+          glm::vec3(0.0, 0.0, 1.0),
+          glm::vec3(1.0, 0.0, 0.0),
+        },
+        .inds = {
+          1, 0, 2,
+          0, 1, 3,
+        }
+      });
+    m_meshes[0].scale = glm::vec3(0.5f, 0.5f, 0.5f);
+    m_meshes[0].trans = glm::vec3(1.0f, 0.0f, 0.0f);
+    m_meshes[1].trans = glm::vec3(0.0f, 1.0f, 0.0f);
+    for (auto& mesh : m_meshes) {
+      mesh.updateTransform();
+    }
+
+    // camera
+    auto eye = glm::vec3(2.0f, 2.0f, 2.0f);
+    auto center = glm::vec3();
+    auto up = glm::vec3(0.0f, 0.0f, 1.0f);
+    m_camera.view = glm::lookAt(eye, center, up);
   }
 
   void initWindow() {
@@ -589,6 +650,12 @@ class Application {
     vk::PipelineLayoutCreateInfo info_pp = {};
     info_pp.sType = vk::StructureType::ePipelineLayoutCreateInfo;
     // any push constants or uniforms go here
+    vk::PushConstantRange push_constant = {};
+    push_constant.offset = 0;
+    push_constant.size = sizeof(VertPushConstants);
+    push_constant.stageFlags = vk::ShaderStageFlagBits::eVertex;
+    info_pp.pPushConstantRanges = &push_constant;
+    info_pp.pushConstantRangeCount = 1;
     auto res = m_device.createPipelineLayout(&info_pp, nullptr, &m_pipeline_layout);
     check(res, "createPipelineLayout");
 
@@ -899,6 +966,10 @@ class Application {
     scissor.extent = m_extent;
     cmd_buf.setScissor(0, 1, &scissor);
 
+    VertPushConstants pc_vert;
+    pc_vert.view = m_camera.view;
+    pc_vert.proj = m_camera.proj;
+
     // TODO: "bindless" rendering with one large buffer shared across all meshes
     for (const auto& mesh : m_meshes) {
       vk::Buffer vert_buffers[] = {mesh.xs_buffer.value(), mesh.colors_buffer.value()};
@@ -910,6 +981,10 @@ class Application {
 
       auto idx_type = getIndexType<decltype(mesh.inds)::value_type>();
       cmd_buf.bindIndexBuffer(mesh.inds_buffer.value(), 0, idx_type);
+
+      pc_vert.model = mesh.transform;
+      cmd_buf.pushConstants(
+          m_pipeline_layout, vk::ShaderStageFlagBits::eVertex, 0, sizeof(pc_vert), &pc_vert);
 
       const size_t n_inst = 1;
       const uint32_t n_idx = mesh.inds.size();
@@ -1099,10 +1174,39 @@ class Application {
     m_framerate.init();
     while (!glfwWindowShouldClose(m_window)) {
       glfwPollEvents();
+      updateGame();
       drawFrame();
       m_framerate.tick();
     }
     m_device.waitIdle();
+  }
+
+  void updateGame() {
+    auto proj_aspect = m_extent.width / (float) m_extent.height;
+    auto proj_near = 0.1f;
+    auto proj_far = 10.0f;
+
+    // perspective
+    auto proj_fovy = glm::radians(45.0f);
+    m_camera.proj = glm::perspective(proj_fovy, proj_aspect, proj_near, proj_far);
+    m_camera.proj[1][1] *= -1; // flip opengl -> vk conventions
+
+    // orthographic
+    // auto proj_left = -proj_aspect;
+    // auto proj_right = proj_aspect;
+    // auto proj_top = 2.0f;
+    // auto proj_bottom = -2.0f;
+    // m_camera.proj = glm::ortho(proj_left, proj_right, proj_top, proj_bottom, proj_near, proj_far);
+
+    float time = deltatime_seconds(my_clock::now(), m_start);
+
+    // dummy dynamics: just rotate each mesh in place
+    for (auto& mesh : m_meshes) {
+      auto theta = time * glm::radians(90.0f);
+      // mesh.rot = glm::quat(cos(theta/2), 0, 0, sin(theta/2));
+      mesh.rot = glm::angleAxis(theta, glm::vec3(0.0f, 0.0f, 1.0f));
+      mesh.updateTransform();
+    }
   }
 
   void drawFrame() {
@@ -1249,8 +1353,10 @@ class Application {
   std::vector<vk::Semaphore> m_sem_image_avail;
   std::vector<vk::Semaphore> m_sem_render_done;
   std::vector<vk::Fence> m_fence_in_flight;
-  // data
+  // game data
   std::vector<Mesh> m_meshes;
+  my_time m_start;
+  Camera m_camera;
   // debugging
   Framerate m_framerate;
 };
