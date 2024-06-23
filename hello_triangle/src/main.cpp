@@ -36,6 +36,32 @@ const size_t frag_size = (size_t)_binary_shader_frag_spv_end - (size_t)_binary_s
 // extern const unsigned _binary_shader_vert_spv_size;
 // extern const unsigned _binary_shader_frag_spv_size;
 
+template<typename T>
+vk::IndexType getIndexType();
+template<>
+vk::IndexType getIndexType<uint16_t>() {
+  return vk::IndexType::eUint16;
+}
+template<>
+vk::IndexType getIndexType<uint32_t>() {
+  return vk::IndexType::eUint32;
+}
+
+template<typename T>
+vk::Format getFormat();
+template<>
+vk::Format getFormat<glm::vec2>() {
+  return vk::Format::eR32G32Sfloat;
+}
+template<>
+vk::Format getFormat<glm::vec3>() {
+  return vk::Format::eR32G32B32Sfloat;
+}
+template<>
+vk::Format getFormat<glm::vec4>() {
+  return vk::Format::eR32G32B32A32Sfloat;
+}
+
 const std::vector<const char*> g_device_extensions = {
   VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
@@ -52,16 +78,25 @@ void check(VkResult res, std::string msg) {
   }
 }
 
+template<typename T>
+size_t sizeof_vec(const std::vector<T>& v) {
+  return sizeof(T) * v.size();
+}
+
 
 // struct-of-arrays mesh
 struct Mesh {
   std::vector<glm::vec3> xs;
   std::vector<glm::vec3> colors;
+  std::vector<uint32_t> inds;
 
+  // TODO: abstract this, coalesce device memory?
   std::optional<vk::Buffer> xs_buffer, xs_buffer_staging;
   std::optional<vk::Buffer> colors_buffer, colors_buffer_staging;
+  std::optional<vk::Buffer> inds_buffer, inds_buffer_staging;
   std::optional<vk::DeviceMemory> xs_mem, xs_mem_staging;
   std::optional<vk::DeviceMemory> colors_mem, colors_mem_staging;
+  std::optional<vk::DeviceMemory> inds_mem, inds_mem_staging;
 
   static std::array<vk::VertexInputBindingDescription, 2>
   getBindingDescriptions() {
@@ -81,12 +116,12 @@ struct Mesh {
     vk::VertexInputAttributeDescription desc_x = {};
     desc_x.binding = 0;
     desc_x.location = 0;
-    desc_x.format = vk::Format::eR32G32B32Sfloat;
+    desc_x.format = getFormat<glm::vec3>(); // vk::Format::eR32G32B32Sfloat;
     desc_x.offset = 0;
     vk::VertexInputAttributeDescription desc_c = {};
     desc_c.binding = 1;
     desc_c.location = 1;
-    desc_c.format = vk::Format::eR32G32B32Sfloat;
+    desc_c.format = getFormat<glm::vec3>(); // vk::Format::eR32G32B32Sfloat;
     desc_c.offset = 0;
     return {desc_x, desc_c};
   }
@@ -124,20 +159,20 @@ class Application {
     // triangles
     m_meshes.push_back({});
     m_meshes.back().xs = {
-      glm::vec3(0.0, -0.5, 0.0),
+      glm::vec3(0.5, -0.5, 0.0),
       glm::vec3(-0.5, 0.5, 0.0),
       glm::vec3(0.5, 0.5, 0.0),
-      glm::vec3(0.4, -0.4, 0.1),
-      glm::vec3(-0.1, 0.6, 0.1),
-      glm::vec3(0.9, 0.6, 0.1)
+      glm::vec3(-0.5, -0.5, 0.0),
     };
     m_meshes.back().colors = {
       glm::vec3(1.0, 1.0, 1.0),
       glm::vec3(0.0, 1.0, 0.0),
       glm::vec3(0.0, 0.0, 1.0),
       glm::vec3(1.0, 0.0, 0.0),
-      glm::vec3(0.0, 1.0, 0.0),
-      glm::vec3(1.0, 1.0, 1.0)
+    };
+    m_meshes.back().inds = {
+      0, 1, 2,
+      1, 0, 3,
     };
   }
 
@@ -607,7 +642,9 @@ class Application {
     
     for (auto& mesh : meshes) {
       auto usage_staging = vk::BufferUsageFlagBits::eTransferSrc;
-      auto usage_dst = vk::BufferUsageFlagBits::eVertexBuffer
+      auto usage_verts_dst = vk::BufferUsageFlagBits::eVertexBuffer
+          | vk::BufferUsageFlagBits::eTransferDst;
+      auto usage_inds_dst = vk::BufferUsageFlagBits::eIndexBuffer
           | vk::BufferUsageFlagBits::eTransferDst;
       auto mem_flags_staging = vk::MemoryPropertyFlagBits::eHostVisible
           | vk::MemoryPropertyFlagBits::eHostCoherent;
@@ -616,7 +653,7 @@ class Application {
       {
         vk::Buffer buffer_staging, buffer_dst;
         vk::DeviceMemory mem_staging, mem_dst;
-        uint32_t size = sizeof(mesh.xs[0]) * mesh.xs.size();
+        uint32_t size = sizeof_vec(mesh.xs);
         createVkBuffer(
             size, usage_staging, mem_flags_staging,
             buffer_staging, mem_staging);
@@ -630,7 +667,7 @@ class Application {
         // no flush required because we requested coherent memory alloc
         m_device.unmapMemory(mem_staging);
 
-        createVkBuffer(size, usage_dst, mem_flags_dst, buffer_dst, mem_dst);
+        createVkBuffer(size, usage_verts_dst, mem_flags_dst, buffer_dst, mem_dst);
         mesh.xs_buffer = buffer_dst;
         mesh.xs_mem = mem_dst;
         copyBuffer(buffer_staging, buffer_dst, size, xfer_cmd_bufs, xfer_fences);
@@ -639,7 +676,7 @@ class Application {
       {
         vk::Buffer buffer_staging, buffer_dst;
         vk::DeviceMemory mem_staging, mem_dst;
-        uint32_t size = sizeof(mesh.colors[0]) * mesh.colors.size();
+        uint32_t size = sizeof_vec(mesh.colors);
         createVkBuffer(
             size, usage_staging, mem_flags_staging,
             buffer_staging, mem_staging);
@@ -653,9 +690,32 @@ class Application {
         // no flush required because we requested coherent memory alloc
         m_device.unmapMemory(mem_staging);
 
-        createVkBuffer(size, usage_dst, mem_flags_dst, buffer_dst, mem_dst);
+        createVkBuffer(size, usage_verts_dst, mem_flags_dst, buffer_dst, mem_dst);
         mesh.colors_buffer = buffer_dst;
         mesh.colors_mem = mem_dst;
+        copyBuffer(buffer_staging, buffer_dst, size, xfer_cmd_bufs, xfer_fences);
+      }
+      // indices buffer
+      {
+        vk::Buffer buffer_staging, buffer_dst;
+        vk::DeviceMemory mem_staging, mem_dst;
+        uint32_t size = sizeof_vec(mesh.inds);
+        createVkBuffer(
+            size, usage_staging, mem_flags_staging,
+            buffer_staging, mem_staging);
+        mesh.inds_buffer_staging = buffer_staging;
+        mesh.inds_mem_staging = mem_staging;
+
+        void* inds_mmap;
+        auto res = m_device.mapMemory(mem_staging, 0, size, {}, &inds_mmap);
+        check(res, "failed to map GPU buffer");
+        memcpy(inds_mmap, mesh.inds.data(), size);
+        // no flush required because we requested coherent memory alloc
+        m_device.unmapMemory(mem_staging);
+
+        createVkBuffer(size, usage_inds_dst, mem_flags_dst, buffer_dst, mem_dst);
+        mesh.inds_buffer = buffer_dst;
+        mesh.inds_mem = mem_dst;
         copyBuffer(buffer_staging, buffer_dst, size, xfer_cmd_bufs, xfer_fences);
       }
     }
@@ -671,16 +731,21 @@ class Application {
     }
 
     for (auto& mesh : meshes) {
-      assert(mesh.xs_buffer_staging && mesh.colors_buffer_staging);
-      assert(mesh.xs_mem_staging && mesh.colors_mem_staging);
+      assert(mesh.xs_buffer_staging && mesh.xs_mem_staging);
+      assert(mesh.colors_buffer_staging && mesh.colors_mem_staging);
+      assert(mesh.inds_buffer_staging && mesh.inds_mem_staging);
       m_device.destroyBuffer(mesh.xs_buffer_staging.value(), nullptr);
-      m_device.destroyBuffer(mesh.colors_buffer_staging.value(), nullptr);
       m_device.freeMemory(mesh.xs_mem_staging.value(), nullptr);
+      m_device.destroyBuffer(mesh.colors_buffer_staging.value(), nullptr);
       m_device.freeMemory(mesh.colors_mem_staging.value(), nullptr);
+      m_device.destroyBuffer(mesh.inds_buffer_staging.value(), nullptr);
+      m_device.freeMemory(mesh.inds_mem_staging.value(), nullptr);
       mesh.xs_buffer_staging.reset();
-      mesh.colors_buffer_staging.reset();
       mesh.xs_mem_staging.reset();
+      mesh.colors_buffer_staging.reset();
       mesh.colors_mem_staging.reset();
+      mesh.inds_buffer_staging.reset();
+      mesh.inds_mem_staging.reset();
     }
   }
 
@@ -809,12 +874,15 @@ class Application {
       const uint32_t n_bindings = 2;
       cmd_buf.bindVertexBuffers(off, n_bindings, vert_buffers, offsets);
 
-      const size_t n_vert = mesh.xs.size();
-      // TODO: reuse vertices with index buf?
-      const size_t n_inst = mesh.xs.size() / 3;
-      const size_t vert_off = 0;
+      auto idx_type = getIndexType<decltype(mesh.inds)::value_type>();
+      cmd_buf.bindIndexBuffer(mesh.inds_buffer.value(), 0, idx_type);
+
+      const size_t n_inst = 1;
+      const uint32_t n_idx = mesh.inds.size();
       const size_t inst_off = 0;
-      cmd_buf.draw(n_vert, n_inst, vert_off, inst_off);
+      const size_t idx_off = 0;
+      const size_t idx_shift = 0;
+      cmd_buf.drawIndexed(n_idx, n_inst, idx_off, idx_shift, inst_off);
     }
 
     cmd_buf.endRenderPass();
@@ -1085,6 +1153,12 @@ class Application {
         m_device.freeMemory(mesh.colors_mem.value(), nullptr);
         mesh.colors_buffer.reset();
         mesh.colors_mem.reset();
+      }
+      if (mesh.inds_buffer) {
+        m_device.destroyBuffer(mesh.inds_buffer.value(), nullptr);
+        m_device.freeMemory(mesh.inds_mem.value(), nullptr);
+        mesh.inds_buffer.reset();
+        mesh.inds_mem.reset();
       }
     }
   }
