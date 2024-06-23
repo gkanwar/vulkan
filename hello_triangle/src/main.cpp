@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 
 #include <array>
+#include <chrono>
 #include <iostream>
 #include <optional>
 #include <set>
@@ -142,6 +143,39 @@ struct SwapChainSupportDetails {
   bool isAcceptable() {
     return !formats.empty() && !modes.empty();
   }
+};
+
+using my_clock = std::chrono::high_resolution_clock;
+using my_time = std::chrono::time_point<my_clock>;
+
+double deltatime_seconds(const my_time& t, const my_time& s) {
+  auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(t - s);
+  return dt.count() / (double) SECOND_NS;
+}
+
+class Framerate {
+ public:
+  void init() {
+    m_start_window = my_clock::now();
+    m_frames = 0;
+  }
+  void tick() {
+    m_frames++;
+    my_time now = my_clock::now();
+    double dt = deltatime_seconds(now, m_start_window);
+    if (dt < 1.0) {
+      return;
+    }
+    auto flags = std::cout.flags();
+    std::cout.precision(2);
+    std::cout << std::fixed << "FPS: " << m_frames / dt << "\n";
+    std::cout.flags(flags);
+    m_start_window = now;
+    m_frames = 0;
+  }
+ private:
+  my_time m_start_window;
+  uint64_t m_frames;
 };
 
 class Application {
@@ -1062,9 +1096,11 @@ class Application {
   }
 
   void mainLoop() {
+    m_framerate.init();
     while (!glfwWindowShouldClose(m_window)) {
       glfwPollEvents();
       drawFrame();
+      m_framerate.tick();
     }
     m_device.waitIdle();
   }
@@ -1215,6 +1251,8 @@ class Application {
   std::vector<vk::Fence> m_fence_in_flight;
   // data
   std::vector<Mesh> m_meshes;
+  // debugging
+  Framerate m_framerate;
 };
 
 int main() {
