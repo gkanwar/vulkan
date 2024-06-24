@@ -40,6 +40,8 @@ const size_t frag_size = (size_t)_binary_shader_frag_spv_end - (size_t)_binary_s
 // extern const unsigned _binary_shader_vert_spv_size;
 // extern const unsigned _binary_shader_frag_spv_size;
 
+constexpr vk::Format DEPTH_FORMAT = vk::Format::eD32Sfloat;
+
 template<typename T>
 vk::IndexType getIndexType();
 template<>
@@ -239,27 +241,25 @@ class Application {
           0, 1, 3,
         }
       });
-    m_meshes.push_back({
-        .xs = {
-          glm::vec3(0.5, -0.5, 0.0),
-          glm::vec3(-0.5, 0.5, 0.0),
-          glm::vec3(0.5, 0.5, 0.0),
-          glm::vec3(-0.5, -0.5, 0.0),
-        },
-        .colors = {
-          glm::vec3(0.0, 0.0, 1.0),
-          glm::vec3(1.0, 0.0, 0.0),
-          glm::vec3(0.0, 0.0, 1.0),
-          glm::vec3(1.0, 0.0, 0.0),
-        },
-        .inds = {
-          1, 0, 2,
-          0, 1, 3,
-        }
-      });
+    m_meshes.push_back(m_meshes[0]);
+    m_meshes[1].colors = {
+      glm::vec3(0.0, 0.0, 1.0),
+      glm::vec3(1.0, 0.0, 0.0),
+      glm::vec3(0.0, 0.0, 1.0),
+      glm::vec3(1.0, 0.0, 0.0),
+    };
+    m_meshes.push_back(m_meshes[0]);
+    m_meshes[2].colors = {
+      glm::vec3(1.0, 1.0, 1.0),
+      glm::vec3(1.0, 1.0, 1.0),
+      glm::vec3(1.0, 1.0, 1.0),
+      glm::vec3(1.0, 1.0, 1.0),
+    };
     m_meshes[0].scale = glm::vec3(0.5f, 0.5f, 0.5f);
     m_meshes[0].trans = glm::vec3(1.0f, 0.0f, 0.0f);
     m_meshes[1].trans = glm::vec3(0.0f, 1.0f, 0.0f);
+    m_meshes[2].scale = glm::vec3(2.0f, 2.0f, 1.0f);
+    m_meshes[2].trans = glm::vec3(0.0f, 0.0f, -0.1f);
     for (auto& mesh : m_meshes) {
       mesh.updateTransform();
     }
@@ -296,8 +296,9 @@ class Application {
     createVkImageViews();
     createVkRenderPass();
     createVkGraphicsPipeline();
-    createVkFramebuffers();
     createVkCommandPool();
+    createVkDepthResources();
+    createVkFramebuffers();
     // TODO: allow meshes to be added/removed dynamically
     createVkVertexBuffers(m_meshes);
     createVkCommandBuffers();
@@ -483,23 +484,69 @@ class Application {
   void createVkImageViews() {
     m_swap_image_views.resize(m_swap_images.size());
     for (size_t i = 0; i < m_swap_images.size(); ++i) {
-      vk::ImageViewCreateInfo info = {};
-      info.sType = vk::StructureType::eImageViewCreateInfo;
-      info.image = m_swap_images[i];
-      info.viewType = vk::ImageViewType::e2D;
-      info.format = m_format.format;
-      info.components.r = vk::ComponentSwizzle::eIdentity;
-      info.components.g = vk::ComponentSwizzle::eIdentity;
-      info.components.b = vk::ComponentSwizzle::eIdentity;
-      info.components.a = vk::ComponentSwizzle::eIdentity;
-      info.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
-      info.subresourceRange.baseMipLevel = 0;
-      info.subresourceRange.levelCount = 1;
-      info.subresourceRange.baseArrayLayer = 0;
-      info.subresourceRange.layerCount = 1;
-      auto res = m_device.createImageView(&info, nullptr, &m_swap_image_views[i]);
-      check(res, "failed to create image view");
+      m_swap_image_views[i] = createImageView(
+          m_swap_images[i], m_format.format, vk::ImageAspectFlagBits::eColor);
     }
+  }
+
+  void createImage(
+      uint32_t width, uint32_t height, vk::Format format, vk::ImageTiling tiling,
+      vk::ImageUsageFlags usage_flags, vk::MemoryPropertyFlags mem_flags,
+      vk::Image& image, vk::DeviceMemory& mem) {
+    vk::ImageCreateInfo info = {};
+    info.sType = vk::StructureType::eImageCreateInfo;
+    info.imageType = vk::ImageType::e2D;
+    info.extent.width = width;
+    info.extent.height = height;
+    info.extent.depth = 1;
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.format = format;
+    info.tiling = tiling;
+    info.initialLayout = vk::ImageLayout::eUndefined;
+    info.usage = usage_flags;
+    info.samples = vk::SampleCountFlagBits::e1;
+    info.sharingMode = vk::SharingMode::eExclusive;
+
+    auto res = m_device.createImage(&info, nullptr, &image);
+    check(res, "createImage");
+
+    vk::MemoryRequirements mem_reqs;
+    m_device.getImageMemoryRequirements(image, &mem_reqs);
+
+    vk::MemoryAllocateInfo info_alloc = {};
+    info_alloc.sType = vk::StructureType::eMemoryAllocateInfo;
+    info_alloc.allocationSize = mem_reqs.size;
+    info_alloc.memoryTypeIndex = findMemoryType(mem_reqs.memoryTypeBits, mem_flags);
+
+    res = m_device.allocateMemory(&info_alloc, nullptr, &mem);
+    check(res, "allocateMemory");
+
+    m_device.bindImageMemory(image, mem, 0);
+  }
+
+  vk::ImageView createImageView(
+      vk::Image image, vk::Format format, vk::ImageAspectFlagBits aspect_flags) {
+    vk::ImageViewCreateInfo info = {};
+    info.sType = vk::StructureType::eImageViewCreateInfo;
+    info.image = image;
+    info.viewType = vk::ImageViewType::e2D;
+    info.format = format;
+    info.components.r = vk::ComponentSwizzle::eIdentity;
+    info.components.g = vk::ComponentSwizzle::eIdentity;
+    info.components.b = vk::ComponentSwizzle::eIdentity;
+    info.components.a = vk::ComponentSwizzle::eIdentity;
+    info.subresourceRange.aspectMask = aspect_flags;
+    info.subresourceRange.baseMipLevel = 0;
+    info.subresourceRange.levelCount = 1;
+    info.subresourceRange.baseArrayLayer = 0;
+    info.subresourceRange.layerCount = 1;
+
+    vk::ImageView image_view;
+    auto res = m_device.createImageView(&info, nullptr, &image_view);
+    check(res, "createImageView");
+
+    return image_view;
   }
 
   void createVkRenderPass() {
@@ -513,27 +560,49 @@ class Application {
     color_attach.initialLayout = vk::ImageLayout::eUndefined;
     color_attach.finalLayout = vk::ImageLayout::ePresentSrcKHR;
 
+    vk::AttachmentDescription depth_attach;
+    depth_attach.format = DEPTH_FORMAT;
+    depth_attach.samples = vk::SampleCountFlagBits::e1;
+    depth_attach.loadOp = vk::AttachmentLoadOp::eClear;
+    depth_attach.storeOp = vk::AttachmentStoreOp::eDontCare;
+    depth_attach.stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
+    depth_attach.stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
+    depth_attach.initialLayout = vk::ImageLayout::eUndefined;
+    depth_attach.finalLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
+
     vk::AttachmentReference color_attach_ref;
     color_attach_ref.attachment = 0;
     color_attach_ref.layout = vk::ImageLayout::eColorAttachmentOptimal;
+    vk::AttachmentReference depth_attach_ref;
+    depth_attach_ref.attachment = 1;
+    depth_attach_ref.layout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
     vk::SubpassDescription subpass;
     subpass.pipelineBindPoint = vk::PipelineBindPoint::eGraphics;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &color_attach_ref;
+    subpass.pDepthStencilAttachment = &depth_attach_ref;
+
+
 
     // wait on color attachment output stage from before this render pass
     vk::SubpassDependency dep = {};
     dep.srcSubpass = VK_SUBPASS_EXTERNAL;
     dep.dstSubpass = 0;
-    dep.srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
-    dep.srcAccessMask = {};
-    dep.dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
-    dep.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+    dep.srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput
+        | vk::PipelineStageFlagBits::eLateFragmentTests;
+    dep.srcAccessMask = vk::AccessFlagBits::eDepthStencilAttachmentWrite;
+    dep.dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput
+        | vk::PipelineStageFlagBits::eEarlyFragmentTests;
+    dep.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite
+        | vk::AccessFlagBits::eDepthStencilAttachmentWrite;
 
+    std::array<vk::AttachmentDescription, 2> attachments = {
+      color_attach, depth_attach
+    };
     vk::RenderPassCreateInfo info = {};
     info.sType = vk::StructureType::eRenderPassCreateInfo;
-    info.attachmentCount = 1;
-    info.pAttachments = &color_attach;
+    info.attachmentCount = attachments.size();
+    info.pAttachments = attachments.data();
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
     info.dependencyCount = 1;
@@ -625,6 +694,13 @@ class Application {
     // stage: depth/stencil testing
     vk::PipelineDepthStencilStateCreateInfo info_ds = {};
     info_ds.sType = vk::StructureType::ePipelineDepthStencilStateCreateInfo;
+    info_ds.depthTestEnable = vk::True;
+    info_ds.depthWriteEnable = vk::True;
+    info_ds.depthCompareOp = vk::CompareOp::eLess;
+    // discard depths outside bound
+    info_ds.depthBoundsTestEnable = vk::False;
+    info_ds.minDepthBounds = 0.0f;
+    info_ds.maxDepthBounds = 1.0f;
 
     // stage: color blending
     vk::PipelineColorBlendAttachmentState cb_attachment = {};
@@ -688,11 +764,15 @@ class Application {
   void createVkFramebuffers() {
     m_swap_fbs.resize(m_swap_image_views.size());
     for (size_t i = 0; i < m_swap_image_views.size(); ++i) {
+      std::array<vk::ImageView, 2> attachments = {
+        m_swap_image_views[i],
+        m_depth_image_view,
+      };
       vk::FramebufferCreateInfo info = {};
       info.sType = vk::StructureType::eFramebufferCreateInfo;
       info.renderPass = m_render_pass;
-      info.attachmentCount = 1;
-      info.pAttachments = &m_swap_image_views[i];
+      info.attachmentCount = attachments.size();
+      info.pAttachments = attachments.data();
       info.width = m_extent.width;
       info.height = m_extent.height;
       info.layers = 1;
@@ -710,6 +790,16 @@ class Application {
     info.queueFamilyIndex = queue_family_indices.graphics_family.value();
     auto res = m_device.createCommandPool(&info, nullptr, &m_cmd_pool);
     check(res, "createCommandPool");
+  }
+
+  void createVkDepthResources() {
+    vk::Format depth_format = DEPTH_FORMAT;
+    createImage(
+        m_extent.width, m_extent.height, depth_format,
+        vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment,
+        vk::MemoryPropertyFlagBits::eDeviceLocal, m_depth_image, m_depth_mem);
+    m_depth_image_view = createImageView(
+        m_depth_image, depth_format, vk::ImageAspectFlagBits::eDepth);
   }
 
   void createVkBuffer(
@@ -740,7 +830,7 @@ class Application {
   void createVkVertexBuffers(std::vector<Mesh>& meshes) {
     std::vector<vk::Fence> xfer_fences;
     std::vector<vk::CommandBuffer> xfer_cmd_bufs;
-    
+
     for (auto& mesh : meshes) {
       auto usage_staging = vk::BufferUsageFlagBits::eTransferSrc;
       auto usage_verts_dst = vk::BufferUsageFlagBits::eVertexBuffer
@@ -946,8 +1036,12 @@ class Application {
       info.renderArea.offset = vk::Offset2D{0, 0};
       info.renderArea.extent = m_extent;
       vk::ClearValue clear_color = {{0.1f, 0.1f, 0.1f, 1.0f}};
-      info.clearValueCount = 1;
-      info.pClearValues = &clear_color;
+      vk::ClearValue clear_depth = {{1.0f, 0}};
+      std::array<vk::ClearValue, 2> clear_values = {
+        clear_color, clear_depth,
+      };
+      info.clearValueCount = clear_values.size();
+      info.pClearValues = clear_values.data();
       cmd_buf.beginRenderPass(&info, vk::SubpassContents::eInline);
     }
 
@@ -1304,6 +1398,9 @@ class Application {
   }
 
   void cleanup() {
+    m_device.destroyImageView(m_depth_image_view, nullptr);
+    m_device.destroyImage(m_depth_image, nullptr);
+    m_device.freeMemory(m_depth_mem, nullptr);
     cleanupVkSwapchain();
     cleanupVkVertexBuffers(m_meshes);
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -1349,6 +1446,10 @@ class Application {
   std::vector<vk::CommandBuffer> m_cmd_buf;
   uint32_t m_frame = 0;
   bool m_fb_resized = false;
+  // depth testing
+  vk::Image m_depth_image;
+  vk::DeviceMemory m_depth_mem;
+  vk::ImageView m_depth_image_view;
   // sync
   std::vector<vk::Semaphore> m_sem_image_avail;
   std::vector<vk::Semaphore> m_sem_render_done;
