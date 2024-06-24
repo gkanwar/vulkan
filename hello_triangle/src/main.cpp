@@ -316,8 +316,10 @@ class Application {
 
     m_device.waitIdle();
     cleanupVkSwapchain();
+
     createVkSwapchain();
     createVkImageViews();
+    createVkDepthResources();
     createVkFramebuffers();
   }
 
@@ -1365,6 +1367,9 @@ class Application {
   }
 
   void cleanupVkSwapchain() {
+    m_device.destroyImageView(m_depth_image_view, nullptr);
+    m_device.destroyImage(m_depth_image, nullptr);
+    m_device.freeMemory(m_depth_mem, nullptr);
     for (auto fb : m_swap_fbs) {
       m_device.destroyFramebuffer(fb, nullptr);
     }
@@ -1398,9 +1403,6 @@ class Application {
   }
 
   void cleanup() {
-    m_device.destroyImageView(m_depth_image_view, nullptr);
-    m_device.destroyImage(m_depth_image, nullptr);
-    m_device.freeMemory(m_depth_mem, nullptr);
     cleanupVkSwapchain();
     cleanupVkVertexBuffers(m_meshes);
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
