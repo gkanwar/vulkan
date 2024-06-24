@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "wgpu_triangle",
+]
+resolver = "2"
