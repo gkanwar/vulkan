@@ -16,6 +16,7 @@ struct State {
   config: wgpu::SurfaceConfiguration,
   queue: wgpu::Queue,
   device: wgpu::Device,
+  pipeline: wgpu::RenderPipeline,
   size: Size,
 }
 
@@ -36,6 +37,7 @@ impl App {
       state.surface.configure(&state.device, &state.config);
     }
   }
+
   pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
     let state = match &mut self.state {
       Some(state) => state,
@@ -50,7 +52,7 @@ impl App {
     };
     let mut encoder = state.device.create_command_encoder(&enc_desc);
     {
-      let color_attach = wgpu::RenderPassColorAttachment {
+      let color_attaches = [Some(wgpu::RenderPassColorAttachment {
         view: &view,
         resolve_target: None,
         ops: wgpu::Operations {
@@ -59,15 +61,19 @@ impl App {
           }),
           store: wgpu::StoreOp::Store,
         }
-      };
+      })];
       let rp_desc = wgpu::RenderPassDescriptor {
         label: Some("render pass"),
-        color_attachments: &[Some(color_attach)],
+        color_attachments: &color_attaches,
         depth_stencil_attachment: None,
         occlusion_query_set: None,
         timestamp_writes: None,
       };
-      let render_pass = encoder.begin_render_pass(&rp_desc);
+      let mut render_pass = encoder.begin_render_pass(&rp_desc);
+      render_pass.set_pipeline(&state.pipeline);
+      let verts = 0..3;
+      let insts = 0..1;
+      render_pass.draw(verts, insts);
     }
 
     state.queue.submit(std::iter::once(encoder.finish()));
@@ -123,6 +129,58 @@ impl ApplicationHandler for App {
       desired_maximum_frame_latency: 2,
     };
 
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/shader.wgsl"));
+    let pipeline_layout_desc = wgpu::PipelineLayoutDescriptor {
+      label: Some("render pipeline layout"),
+      bind_group_layouts: &[],
+      push_constant_ranges: &[],
+    };
+    let pipeline_layout = device.create_pipeline_layout(&pipeline_layout_desc);
+    let frag_targets = [Some(wgpu::ColorTargetState {
+      format: config.format,
+      blend: Some(wgpu::BlendState::REPLACE),
+      write_mask: wgpu::ColorWrites::ALL,
+    })];
+    let pipeline_desc = wgpu::RenderPipelineDescriptor {
+      label: Some("render pipeline"),
+      layout: Some(&pipeline_layout),
+      vertex: wgpu::VertexState {
+        module: &shader,
+        entry_point: "vs_main",
+        // todo: external vertex buffers
+        buffers: &[],
+        // todo: push constants here?
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+      },
+      fragment: Some(wgpu::FragmentState {
+        module: &shader,
+        entry_point: "fs_main",
+        targets: &frag_targets,
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+      }),
+      primitive: wgpu::PrimitiveState {
+        topology: wgpu::PrimitiveTopology::TriangleList,
+        strip_index_format: None,
+        front_face: wgpu::FrontFace::Ccw,
+        cull_mode: Some(wgpu::Face::Back),
+        polygon_mode: wgpu::PolygonMode::Fill,
+        unclipped_depth: false,
+        conservative: false,
+      },
+      // todo
+      depth_stencil: None,
+      multisample: wgpu::MultisampleState {
+        count: 1,
+        mask: !0,
+        alpha_to_coverage_enabled: false,
+      },
+      multiview: None,
+    };
+    let pipeline = device.create_render_pipeline(&pipeline_desc);
+
+    // request initial draw
+    window.request_redraw();
+
     self.state = Some(State {
       size,
       instance,
@@ -131,12 +189,14 @@ impl ApplicationHandler for App {
       surface,
       window,
       device,
+      pipeline,
     });
   }
 
   fn window_event(
     &mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent,
   ) {
+    println!("window_event {:?}", event);
     let state = match &self.state {
       Some(state) => state,
       None => return,
