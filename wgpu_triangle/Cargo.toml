@@ -10,4 +10,4 @@ env_logger = "0.11"
 wgpu = "0.20"
 pollster = "0.3"
 bytemuck = { version = "1.12", features = ["derive"] }
-glam = { versions = "0.28", features = ["bytemuck"] }
+glam = { version = "0.28", features = ["bytemuck"] }
