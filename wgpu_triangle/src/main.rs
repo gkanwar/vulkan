@@ -179,9 +179,14 @@ struct App {
   state: Option<GraphicsState>,
   meshes: Vec<Mesh>,
   camera: Camera,
+  start_time: Option<std::time::Instant>,
 }
 
 impl App {
+  pub fn start(&mut self) {
+    self.start_time = Some(std::time::Instant::now());
+  }
+
   pub fn resize(&mut self, new_size: Size) {
     if new_size.width == 0 || new_size.height == 0 {
       return;
@@ -207,9 +212,9 @@ impl App {
       label: Some("render encoder"),
     };
     let mut push_consts = VertPushConstants {
-      proj: self.camera.get_proj(),
-      view: self.camera.get_view(),
       model: Mat4::IDENTITY,
+      view: self.camera.get_view(),
+      proj: self.camera.get_proj(),
     };
     let mut encoder = state.device.create_command_encoder(&enc_desc);
     {
@@ -249,6 +254,14 @@ impl App {
     output.present();
 
     Ok(())
+  }
+
+  fn update(&mut self) {
+    let time = self.start_time.unwrap().elapsed().as_secs_f32();
+    self.meshes.iter_mut().for_each(|mesh| {
+      let theta = time * (90.0_f32).to_radians();
+      mesh.rot = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), theta);
+    });
   }
 
   fn init_mesh_buffers(&mut self) {
@@ -297,9 +310,9 @@ impl ApplicationHandler for App {
       .next().unwrap();
     let (device, queue) = adapter.request_device(
       &wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::empty(),
+        required_features: wgpu::Features::PUSH_CONSTANTS,
         required_limits: wgpu::Limits {
-          max_push_constant_size: 128,
+          max_push_constant_size: 256,
           .. Default::default()
         },
         label: None
@@ -437,6 +450,7 @@ impl ApplicationHandler for App {
             eprintln!("{:?}", e);
           },
         };
+        self.update();
       },
       WindowEvent::Resized(size) => {
         self.resize(size);
@@ -472,5 +486,6 @@ pub fn main() {
     .. Default::default()
   });
   app.camera = Default::default();
+  app.start();
   event_loop.run_app(&mut app).unwrap();
 }

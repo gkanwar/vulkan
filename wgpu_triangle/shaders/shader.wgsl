@@ -21,7 +21,7 @@ fn vs_main(in: VertexInput)
   var out: VertexOutput;
   out.color = in.color;
   var pos: vec4<f32> = vec4<f32>(in.pos, 1.0);
-  out.clip_position = pos * c.model * c.view * c.proj;
+  out.clip_position = c.proj * c.view * c.model * pos;
   return out;
 }
 
